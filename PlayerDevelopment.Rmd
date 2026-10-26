@@ -1,0 +1,1641 @@
+---
+title: "Player_Development_Model"
+author: "Hunter Clark"
+date: "2026-10-09"
+output: html_document
+---
+#Project Question:
+Can historical player performance predict next-season points per field-goal attempt better than repeating the previous season?
+
+##Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = TRUE,
+  warning = TRUE
+)
+```
+
+##Settings
+
+```{r settings}
+#Run the code below to change players
+#unique(
+  #league_shots[
+    #grepl("search Player name", league_shots$PLAYER_NAME, ignore.case = TRUE),
+    #c("PLAYER_NAME", "PLAYER_ID")
+  #]
+#)
+
+player_id <- 1641717L
+player_name <- "Cason Wallace"
+
+# Season ending years: 2026 means 2025–26.
+season_years <- 2010:2026
+forecast_year <- 2027L
+
+set.seed(2026)
+
+dir.create(
+  "data/development_raw",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+```
+
+##Loading season statistics
+
+```{r}
+load_player_season <- function(year) {
+
+  dir.create(
+    "data/development_raw",
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+
+  file_name <- paste0(
+    "player_season_stats_", year, ".csv"
+  )
+
+  local_path <- file.path(
+    "data/development_raw",
+    file_name
+  )
+
+  url <- paste0(
+    "https://github.com/sportsdataverse/",
+    "sportsdataverse-data/releases/download/",
+    "nba_stats_player_season_stats/",
+    file_name
+  )
+
+  if (!file.exists(local_path)) {
+
+    previous_timeout <- getOption("timeout")
+
+    on.exit(
+      options(timeout = previous_timeout),
+      add = TRUE
+    )
+
+    options(timeout = max(300, previous_timeout))
+
+    tryCatch(
+      download.file(
+        url = url,
+        destfile = local_path,
+        method = "libcurl",
+        mode = "wb"
+      ),
+      error = function(e) {
+        unlink(local_path)
+        stop(
+          "Download failed for ", year, ": ",
+          conditionMessage(e)
+        )
+      }
+    )
+  }
+
+  # Reading and cleaning stay INSIDE the function.
+  raw <- read.csv(
+    local_path,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+
+  required_columns <- c(
+    "player_id", "player_name", "season", "age",
+    "season_type", "measure_type", "per_mode",
+    "gp", "min", "fgm", "fga", "fg3m", "fg3a",
+    "ftm", "fta", "ast", "reb", "tov"
+  )
+
+  missing_columns <- setdiff(
+    required_columns,
+    names(raw)
+  )
+
+  if (length(missing_columns) > 0L) {
+    stop(
+      "Missing columns: ",
+      paste(missing_columns, collapse = ", ")
+    )
+  }
+
+  data <- subset(
+    raw,
+    season_type == "regular-season" &
+      measure_type == "base" &
+      per_mode == "totals"
+  )
+
+  if (nrow(data) == 0L) {
+    stop("No regular-season totals found for ", year)
+  }
+
+  data <- data[, required_columns, drop = FALSE]
+
+  stopifnot(
+    all(data$season == year),
+    !anyNA(data$player_id),
+    !anyDuplicated(data$player_id)
+  )
+
+  message(
+    "Loaded ", nrow(data),
+    " player-season rows for ", year
+  )
+
+  return(data)
+}
+```
+
+#Inspecting the season
+
+```{r inspect-latest-season}
+latest_season <- load_player_season(2026L)
+
+dim(latest_season)
+str(latest_season)
+
+selected_player <- subset(
+  latest_season,
+  player_id == as.integer(player_id)
+)
+
+knitr::kable(
+  selected_player[, c(
+    "player_name", "season", "age", "gp",
+    "min", "fgm", "fga", "fg3m", "fg3a"
+  )],
+  row.names = FALSE
+)
+
+# Field-goal points exclude free throws.
+# Each made basket contributes two points,
+# with one extra point for each made three.
+selected_player$field_goal_points <- with(
+  selected_player,
+  2 * fgm + fg3m
+)
+
+selected_player$points_per_attempt <- with(
+  selected_player,
+  ifelse(
+    fga > 0,
+    field_goal_points / fga,
+    NA_real_
+  )
+)
+
+knitr::kable(
+  selected_player[, c(
+    "player_name",
+    "field_goal_points",
+    "fga",
+    "points_per_attempt"
+  )],
+  digits = 3,
+  row.names = FALSE
+)
+```
+
+##Loading Historical Seasons
+
+```{r loading-historical-season}
+# Run the loader once for each season ending year
+season_data <- lapply(
+  season_years,
+  load_player_season
+)
+
+#Combining the two tables
+player_seasons <- do.call(rbind, season_data)
+rownames(player_seasons) <- NULL
+
+#Confirming one row per player per season
+stopifnot(
+  !anyDuplicated(
+    player_seasons[, c("player_id", "season")]
+  )
+)
+
+#Counting players and field-goal attempts by season
+season_coverage <- aggregate(
+  cbind(
+    players = rep(1L, nrow(player_seasons)),
+    field_goal_attempts = player_seasons$fga
+  ),
+  by = list(season = player_seasons$season),
+  FUN = sum
+)
+
+knitr::kable(
+  season_coverage,
+  row.names = FALSE
+)
+
+#Inspecting the selected player's history
+selected_player_history <- subset(
+  player_seasons,
+  player_id == as.integer(player_id)
+)
+
+selected_player_history <- selected_player_history[
+  order(selected_player_history$season),
+  ,
+  drop = FALSE
+]
+
+knitr::kable(
+  selected_player_history[, c(
+    "player_name", "season", "age",
+    "gp", "min", "fgm", "fga", "fg3m", "fg3a"
+  )],
+  row.names = FALSE
+)
+```
+
+##Development Features
+
+```{r development-feature}
+#Dividing it safely
+safe_ratio <- function(numerator, denominator) {
+  result <- rep(NA_real_, length(denominator))
+  
+  valid <- is.finite(numerator) &
+    is.finite(denominator) &
+    denominator > 0
+  
+  result[valid] <- numerator[valid] / denominator[valid]
+  result
+}
+
+development_data <- player_seasons
+
+#checking shooting totals before calculating the features
+shooting_columns <- c(
+  "fgm", "fga", "fg3m", "fg3a", "ftm", "fta"
+)
+
+stopifnot(
+  all(complete.cases(
+    development_data[, shooting_columns, drop = FALSE]
+  )),
+  all(as.matrix(
+    development_data[, shooting_columns, drop = FALSE]
+  ) >= 0),
+  all(development_data$fgm <= development_data$fga),
+  all(development_data$fg3m <= development_data$fg3a),
+  all(development_data$fg3m <= development_data$fgm),
+  all(development_data$fg3a <= development_data$fga),
+  all(development_data$ftm <= development_data$fta)
+)
+
+development_data$two_point_makes <- with(
+  development_data, fgm - fg3m
+)
+
+development_data$two_point_attempts <- with(
+  development_data, fga - fg3a
+)
+
+stopifnot(
+  all(
+    development_data$two_point_makes <=
+      development_data$two_point_attempts
+  )
+)
+
+development_data$field_goal_points <- with(
+  development_data, 2 * fgm + fg3m
+)
+
+development_data$points_per_attempt <- with(
+  development_data,
+  safe_ratio(field_goal_points, fga)
+)
+
+development_data$two_point_pct <- with(
+  development_data,
+  safe_ratio(two_point_makes, two_point_attempts)
+)
+
+development_data$three_point_pct <- with(
+  development_data,
+  safe_ratio(fg3m, fg3a)
+)
+
+development_data$free_throw_pct <- with(
+  development_data,
+  safe_ratio(ftm, fta)
+)
+
+development_data$three_point_share <- with(
+  development_data,
+  safe_ratio(fg3a, fga)
+)
+
+development_data$minutes_per_game <- with(
+  development_data,
+  safe_ratio(min, gp)
+)
+
+development_data$attempts_per_game <- with(
+  development_data,
+  safe_ratio(fga, gp)
+)
+
+development_data$assists_per_game <- with(
+  development_data,
+  safe_ratio(ast, gp)
+)
+
+development_data$rebounds_per_game <- with(
+  development_data,
+  safe_ratio(reb, gp)
+)
+
+development_data$turnovers_per_game <- with(
+  development_data,
+  safe_ratio(tov, gp)
+)
+```
+
+##Consecutive Season Pairs
+
+```{r consecutive-season-pairs}
+# Create a separate table containing future outcomes.
+next_season <- development_data[, c(
+  "player_id", "season", "gp", "fga",
+  "points_per_attempt"
+)]
+
+names(next_season) <- c(
+  "player_id", "target_season", "next_gp", "next_fga",
+  "next_points_per_attempt"
+)
+
+# Match a future season to the season immediately before it.
+next_season$season <- next_season$target_season - 1L
+next_season$next_season_recorded <- TRUE
+
+development_pairs <- merge(
+  development_data,
+  next_season,
+  by = c("player_id", "season"),
+  all.x = TRUE,
+  sort = FALSE
+)
+
+development_pairs <- development_pairs[
+  order(development_pairs$season, development_pairs$player_id),
+  ,
+  drop = FALSE
+]
+
+stopifnot(
+  nrow(development_pairs) == nrow(development_data),
+  !anyDuplicated(
+    development_pairs[, c("player_id", "season")]
+  )
+)
+
+# The last loaded season has no observed next-season outcomes.
+historical_pairs <- subset(
+  development_pairs,
+  season < max(season_years)
+)
+
+historical_pairs$has_next_season <- (
+  !is.na(historical_pairs$next_season_recorded)
+)
+
+historical_pairs$has_next_efficiency <- (
+  historical_pairs$has_next_season &
+    is.finite(historical_pairs$next_points_per_attempt)
+)
+
+pair_coverage <- aggregate(
+  cbind(
+    current_player_seasons = rep(1L, nrow(historical_pairs)),
+    next_season_recorded = as.integer(
+      historical_pairs$has_next_season
+    ),
+    next_efficiency_available = as.integer(
+      historical_pairs$has_next_efficiency
+    )
+  ) ~ season,
+  data = historical_pairs,
+  FUN = sum
+)
+
+pair_coverage$next_efficiency_unavailable <- with(
+  pair_coverage,
+  current_player_seasons - next_efficiency_available
+)
+
+knitr::kable(pair_coverage, row.names = FALSE)
+
+# Keep the latest season separately for future projections.
+forecast_candidates <- subset(
+  development_data,
+  season == forecast_year - 1L
+)
+
+# Inspect the selected player's matched outcomes.
+player_pair_review <- subset(
+  historical_pairs,
+  player_id == as.integer(player_id)
+)
+
+knitr::kable(
+  player_pair_review[, c(
+    "player_name", "season", "fga",
+    "points_per_attempt", "target_season",
+    "next_fga", "next_points_per_attempt"
+  )],
+  digits = 3,
+  row.names = FALSE
+)
+```
+
+##Modeling Sample
+
+```{r Modeling-sample}
+# Require a meaningful amount of current-season shooting.
+minimum_current_attempts <- 200L
+
+modeling_data <- historical_pairs[
+  is.finite(historical_pairs$fga) &
+    historical_pairs$fga >= minimum_current_attempts &
+    is.finite(historical_pairs$points_per_attempt) &
+    is.finite(historical_pairs$next_points_per_attempt),
+  ,
+  drop = FALSE
+]
+
+# The change we will eventually report for each player.
+modeling_data$efficiency_change <- with(
+  modeling_data,
+  next_points_per_attempt - points_per_attempt
+)
+
+# Confirm that each outcome comes from the following season.
+stopifnot(
+  nrow(modeling_data) > 0L,
+  all(modeling_data$target_season == modeling_data$season + 1L),
+  !anyDuplicated(modeling_data[, c("player_id", "season")])
+)
+
+sample_counts <- aggregate(
+  list(player_season_pairs = rep(1L, nrow(modeling_data))),
+  by = list(target_season = modeling_data$target_season),
+  FUN = sum
+)
+
+knitr::kable(
+  sample_counts,
+  caption = "Eligible player-season pairs by outcome season"
+)
+```
+
+##Development time splits
+
+```{r development-time-splits}
+# Split by the season being predicted, not the current season.
+training_target_end <- 2023L
+validation_target_years <- c(2024L, 2025L)
+test_target_year <- 2026L
+
+development_train <- modeling_data[
+  modeling_data$target_season <= training_target_end,
+  ,
+  drop = FALSE
+]
+
+development_validation <- modeling_data[
+  modeling_data$target_season %in% validation_target_years,
+  ,
+  drop = FALSE
+]
+
+development_test <- modeling_data[
+  modeling_data$target_season == test_target_year,
+  ,
+  drop = FALSE
+]
+
+# Check that every split contains data and follows time order.
+stopifnot(
+  nrow(development_train) > 0L,
+  nrow(development_validation) > 0L,
+  nrow(development_test) > 0L,
+  max(development_train$target_season) <
+    min(development_validation$target_season),
+  max(development_validation$target_season) <
+    min(development_test$target_season)
+)
+
+# Display the size and outcome years of each split.
+split_summary <- data.frame(
+  dataset = c("Training", "Validation", "Final test"),
+  player_season_pairs = c(
+    nrow(development_train),
+    nrow(development_validation),
+    nrow(development_test)
+  ),
+  earliest_target_year = c(
+    min(development_train$target_season),
+    min(development_validation$target_season),
+    min(development_test$target_season)
+  ),
+  latest_target_year = c(
+    max(development_train$target_season),
+    max(development_validation$target_season),
+    max(development_test$target_season)
+  )
+)
+
+knitr::kable(split_summary)
+```
+
+##Development baseline
+
+```{r development-baseline}
+# Predict that each player's efficiency stays the same.
+development_validation$baseline_prediction <-
+  development_validation$points_per_attempt
+
+# A reusable function for evaluating numerical predictions.
+regression_metrics <- function(actual, predicted) {
+
+  if (
+    length(actual) != length(predicted) ||
+    length(actual) == 0L ||
+    any(!is.finite(actual)) ||
+    any(!is.finite(predicted))
+  ) {
+    stop("Actual and predicted values must be finite and equal in length.")
+  }
+
+  error <- predicted - actual
+
+  data.frame(
+    mae = mean(abs(error)),
+    rmse = sqrt(mean(error^2)),
+    bias = mean(error)
+  )
+}
+
+baseline_results <- cbind(
+  data.frame(model = "Previous-season efficiency"),
+  regression_metrics(
+    actual = development_validation$next_points_per_attempt,
+    predicted = development_validation$baseline_prediction
+  )
+)
+
+knitr::kable(
+  baseline_results,
+  digits = 4,
+  caption = "Validation performance: points per field-goal attempt"
+)
+```
+
+##Regression model
+
+```{r development-predictors}
+# Explicitly list the information available when forecasting.
+predictor_columns <- c(
+  "age",
+  "gp",
+  "fga",
+  "points_per_attempt",
+  "two_point_pct",
+  "three_point_pct",
+  "free_throw_pct",
+  "three_point_share",
+  "minutes_per_game",
+  "attempts_per_game",
+  "assists_per_game",
+  "rebounds_per_game",
+  "turnovers_per_game"
+)
+
+stopifnot(
+  all(predictor_columns %in% names(development_train)),
+  all(vapply(
+    development_train[, predictor_columns, drop = FALSE],
+    is.numeric,
+    logical(1)
+  ))
+)
+
+# Learn replacement values using TRAINING data only.
+training_medians <- vapply(
+  development_train[, predictor_columns, drop = FALSE],
+  function(x) {
+    usable <- x[is.finite(x)]
+
+    if (length(usable) == 0L) {
+      stop("A predictor has no finite training values.")
+    }
+
+    median(usable)
+  },
+  numeric(1)
+)
+
+# Prepare any dataset using the same predictors and medians.
+prepare_predictors <- function(data) {
+
+  predictors <- data[, predictor_columns, drop = FALSE]
+
+  # Record missing values before replacing them.
+  missing_flags <- as.data.frame(
+    lapply(predictors, function(x) {
+      as.integer(!is.finite(x))
+    })
+  )
+
+  names(missing_flags) <- paste0(
+    predictor_columns,
+    "_missing"
+  )
+
+  # Replace missing or infinite values with training medians.
+  for (column in predictor_columns) {
+
+    missing <- !is.finite(predictors[[column]])
+
+    predictors[[column]][missing] <-
+      training_medians[[column]]
+  }
+
+  as.matrix(cbind(predictors, missing_flags))
+}
+
+x_train_full <- prepare_predictors(development_train)
+x_validation_full <- prepare_predictors(development_validation)
+
+# Remove columns that never vary in training.
+varying_columns <- apply(
+  x_train_full,
+  2,
+  function(x) length(unique(x)) > 1L
+)
+
+model_feature_names <- colnames(x_train_full)[varying_columns]
+
+x_train <- x_train_full[
+  ,
+  model_feature_names,
+  drop = FALSE
+]
+
+x_validation <- x_validation_full[
+  ,
+  model_feature_names,
+  drop = FALSE
+]
+
+# Store the outcomes separately from the predictors.
+y_train <- development_train$next_points_per_attempt
+y_validation <- development_validation$next_points_per_attempt
+
+stopifnot(
+  nrow(x_train) == length(y_train),
+  nrow(x_validation) == length(y_validation),
+  identical(colnames(x_train), colnames(x_validation)),
+  all(is.finite(x_train)),
+  all(is.finite(x_validation)),
+  all(is.finite(y_train)),
+  all(is.finite(y_validation))
+)
+
+# Inspect the resulting matrices.
+predictor_summary <- data.frame(
+  dataset = c("Training", "Validation"),
+  rows = c(nrow(x_train), nrow(x_validation)),
+  predictors = c(ncol(x_train), ncol(x_validation))
+)
+
+knitr::kable(predictor_summary)
+
+print(model_feature_names)
+```
+
+##Development Elastic net
+
+```{r development-elastic-net}
+library(glmnet)
+
+# Try three mixtures of ridge and lasso penalties.
+alpha_values <- c(0.25, 0.50, 0.75)
+
+elastic_net_fits <- vector("list", length(alpha_values))
+tuning_results <- vector("list", length(alpha_values))
+
+for (i in seq_along(alpha_values)) {
+
+  # Fit a sequence of penalty strengths using training data.
+  fit <- glmnet(
+    x = x_train,
+    y = y_train,
+    family = "gaussian",
+    alpha = alpha_values[i],
+    standardize = TRUE,
+    nlambda = 100
+  )
+
+  elastic_net_fits[[i]] <- fit
+
+  # Each column contains predictions for one lambda.
+  predictions <- as.matrix(
+    predict(
+      fit,
+      newx = x_validation,
+      s = fit$lambda,
+      type = "response"
+    )
+  )
+
+  stopifnot(
+    nrow(predictions) == length(y_validation),
+    ncol(predictions) == length(fit$lambda)
+  )
+
+  # Calculate one set of metrics for each fitted lambda.
+  scores <- do.call(
+    rbind,
+    lapply(seq_along(fit$lambda), function(j) {
+
+      predicted <- as.numeric(predictions[, j])
+      error <- predicted - y_validation
+
+      data.frame(
+        mae = mean(abs(error)),
+        rmse = sqrt(mean(error^2)),
+        bias = mean(error)
+      )
+    })
+  )
+
+  tuning_results[[i]] <- data.frame(
+    fit_index = rep(i, length(fit$lambda)),
+    alpha = rep(alpha_values[i], length(fit$lambda)),
+    lambda = fit$lambda,
+    mae = scores$mae,
+    rmse = scores$rmse,
+    bias = scores$bias
+  )
+
+} # Close the loop AFTER saving this alpha's results.
+
+# Combine results from all three alpha values.
+elastic_net_tuning <- do.call(rbind, tuning_results)
+rownames(elastic_net_tuning) <- NULL
+
+# Rank settings by MAE, using RMSE to break ties.
+elastic_net_tuning <- elastic_net_tuning[
+  order(elastic_net_tuning$mae, elastic_net_tuning$rmse),
+  ,
+  drop = FALSE
+]
+
+best_elastic_net_settings <- elastic_net_tuning[
+  1,
+  ,
+  drop = FALSE
+]
+
+best_elastic_net <- elastic_net_fits[[
+  best_elastic_net_settings$fit_index
+]]
+
+best_lambda <- best_elastic_net_settings$lambda
+
+# Save predictions from the selected settings.
+development_validation$elastic_net_prediction <- as.numeric(
+  predict(
+    best_elastic_net,
+    newx = x_validation,
+    s = best_lambda,
+    type = "response"
+  )
+)
+
+# Compare elastic net with the previous-season baseline.
+elastic_net_results <- cbind(
+  data.frame(model = "Elastic net"),
+  regression_metrics(
+    actual = y_validation,
+    predicted = development_validation$elastic_net_prediction
+  )
+)
+
+validation_comparison <- rbind(
+  baseline_results,
+  elastic_net_results
+)
+
+print(
+  knitr::kable(
+    best_elastic_net_settings[, c("alpha", "lambda"), drop = FALSE],
+    digits = 6,
+    caption = "Selected elastic net settings"
+  )
+)
+
+print(
+  knitr::kable(
+    validation_comparison,
+    digits = 4,
+    caption = "Validation performance: points per field-goal attempt"
+  )
+)
+```
+
+##Elastic net coefficients
+
+```{r elastic-net-coefficients}
+#Extracting coefficients at the selected penalty strength
+coefficient_matrix <- as.matrix(
+  coef(
+    best_elastic_net,
+    s = best_lambda
+  )
+)
+
+coefficient_table <- data.frame(
+  predictor = rownames(coefficient_matrix),
+  coefficient = as.numeric(coefficient_matrix[, 1]),
+  row.names = NULL
+)
+
+#Separating the intercept from the predictor coefficients
+predictor_coefficients <- coefficient_table[
+  coefficient_table$predictor != "(Intercept)",
+  ,
+  drop = FALSE
+]
+
+#Training standard deviations help compare numerical predictors
+training_sd <- apply(x_train, 2, sd)
+
+predictor_coefficients$training_sd <- unname(
+  training_sd[predictor_coefficients$predictor]
+)
+
+#Predicted difference associated with a one-SD increase
+predictor_coefficients$effect_per_sd <-
+  predictor_coefficients$coefficient *
+  predictor_coefficients$training_sd
+
+#Expressing the difference as points per 100 field goal attempts
+predictor_coefficients$points_per_100_per_sd <-
+  100 * predictor_coefficients$effect_per_sd
+
+#Order by the size of the standardized coefficients
+predictor_coefficients <- predictor_coefficients[
+  order(
+    abs(predictor_coefficients$effect_per_sd),
+    decreasing = TRUE
+  ),
+  ,
+  drop = FALSE
+]
+
+print(
+  knitr::kable(
+    best_elastic_net_settings[, c("alpha", "lambda"), drop = FALSE],
+    digits = 6,
+    caption = "Selected elastic net settings"
+  )
+)
+
+print(
+  knitr::kable(
+    predictor_coefficients[
+      ,
+      c("predictor", "coefficient", "points_per_100_per_sd"),
+      drop = FALSE
+    ],
+    digits = 4,
+    caption = "Elastic net coefficients"
+  )
+)
+```
+
+```{r development-xgboost}
+library(xgboost)
+
+dtrain <- xgb.DMatrix(
+  data = x_train,
+  label = y_train
+)
+
+dvalidation <- xgb.DMatrix(
+  data = x_validation
+)
+
+xgb_grid <- expand.grid(
+  max_depth = c(1L, 2L, 3L),
+  nrounds = c(100L, 300L),
+  KEEP.OUT.ATTRS = FALSE
+)
+
+xgb_fits <- vector("list", nrow(xgb_grid))
+xgb_scores <- vector("list", nrow(xgb_grid))
+
+for (i in seq_len(nrow(xgb_grid))) {
+
+  fit <- xgb.train(
+    params = list(
+      objective = "reg:squarederror",
+      eta = 0.03,
+      max_depth = xgb_grid$max_depth[i],
+      min_child_weight = 20,
+      subsample = 0.8,
+      colsample_bytree = 0.8,
+      lambda = 1,
+      seed = 2026,
+      nthread = 1
+    ),
+    data = dtrain,
+    nrounds = xgb_grid$nrounds[i],
+    verbose = 0
+  )
+
+  xgb_fits[[i]] <- fit
+
+  predictions <- as.numeric(
+    predict(fit, newdata = dvalidation)
+  )
+
+  xgb_scores[[i]] <- regression_metrics(
+    actual = y_validation,
+    predicted = predictions
+  )
+}
+
+# Combine settings with their validation scores.
+xgb_tuning <- cbind(
+  data.frame(fit_index = seq_len(nrow(xgb_grid))),
+  xgb_grid,
+  do.call(rbind, xgb_scores)
+)
+
+# Select the lowest validation MAE.
+xgb_tuning <- xgb_tuning[
+  order(xgb_tuning$mae, xgb_tuning$rmse),
+  ,
+  drop = FALSE
+]
+
+rownames(xgb_tuning) <- NULL
+
+best_xgb_settings <- xgb_tuning[1, , drop = FALSE]
+
+best_xgb <- xgb_fits[[
+  best_xgb_settings$fit_index
+]]
+
+development_validation$xgb_prediction <- as.numeric(
+  predict(best_xgb, newdata = dvalidation)
+)
+
+xgb_results <- cbind(
+  data.frame(model = "XGBoost"),
+  regression_metrics(
+    actual = y_validation,
+    predicted = development_validation$xgb_prediction
+  )
+)
+
+# Compare all three approaches on identical validation rows.
+validation_comparison <- rbind(
+  baseline_results,
+  elastic_net_results,
+  xgb_results
+)
+
+print(
+  knitr::kable(
+    xgb_tuning,
+    digits = 4,
+    caption = "XGBoost settings and validation results"
+  )
+)
+
+print(
+  knitr::kable(
+    validation_comparison,
+    digits = 4,
+    caption = "Validation model comparison"
+  )
+)
+```
+
+###Final test
+
+```{r development-final-test}
+x_test_full <- prepare_predictors(development_test)
+
+x_test <- x_test_full[
+  ,
+  model_feature_names,
+  drop = FALSE
+]
+
+y_test <- development_test$next_points_per_attempt
+
+stopifnot(
+  identical(colnames(x_train), colnames(x_test)),
+  nrow(x_test) == length(y_test),
+  all(is.finite(x_test)),
+  all(is.finite(y_test))
+)
+
+# Baseline: predict no change in efficiency.
+development_test$baseline_prediction <-
+  development_test$points_per_attempt
+
+# Use the elastic net settings selected on validation.
+development_test$elastic_net_prediction <- as.numeric(
+  predict(
+    best_elastic_net,
+    newx = x_test,
+    s = best_lambda,
+    type = "response"
+  )
+)
+
+test_baseline_results <- cbind(
+  data.frame(model = "Previous-season efficiency"),
+  regression_metrics(
+    actual = y_test,
+    predicted = development_test$baseline_prediction
+  )
+)
+
+test_elastic_net_results <- cbind(
+  data.frame(model = "Elastic net"),
+  regression_metrics(
+    actual = y_test,
+    predicted = development_test$elastic_net_prediction
+  )
+)
+
+final_test_comparison <- rbind(
+  test_baseline_results,
+  test_elastic_net_results
+)
+
+print(
+  knitr::kable(
+    final_test_comparison,
+    digits = 4,
+    caption = "Final test: predicting 2025–26 efficiency"
+  )
+)
+```
+
+##Development Test Bootstrap
+
+```{r development-test-bootstrap}
+# Each final-test row should represent a different player.
+stopifnot(
+  !anyDuplicated(development_test$player_id)
+)
+
+# Calculate each player's absolute prediction errors.
+baseline_absolute_error <- with(
+  development_test,
+  abs(baseline_prediction - next_points_per_attempt)
+)
+
+elastic_net_absolute_error <- with(
+  development_test,
+  abs(elastic_net_prediction - next_points_per_attempt)
+)
+
+# Negative differences favor elastic net.
+player_error_difference <-
+  elastic_net_absolute_error - baseline_absolute_error
+
+stopifnot(
+  length(player_error_difference) > 0L,
+  all(is.finite(player_error_difference))
+)
+
+# Resample players while preserving the paired model errors.
+set.seed(2026)
+
+bootstrap_mae_difference <- replicate(5000, {
+
+  selected_rows <- sample.int(
+    n = length(player_error_difference),
+    size = length(player_error_difference),
+    replace = TRUE
+  )
+
+  mean(player_error_difference[selected_rows])
+})
+
+# Percentile bootstrap interval.
+interval <- quantile(
+  bootstrap_mae_difference,
+  probs = c(0.025, 0.975),
+  names = FALSE
+)
+
+bootstrap_comparison <- data.frame(
+  comparison = "Elastic net minus baseline MAE",
+  observed_difference = mean(player_error_difference),
+  lower_95 = interval[1],
+  upper_95 = interval[2]
+)
+
+# Express the results in points per 100 field-goal attempts.
+bootstrap_comparison[, c(
+  "observed_difference", "lower_95", "upper_95"
+)] <- 100 * bootstrap_comparison[, c(
+  "observed_difference", "lower_95", "upper_95"
+)]
+
+print(
+  knitr::kable(
+    bootstrap_comparison,
+    digits = 3,
+    caption = "MAE difference: points per 100 field-goal attempts"
+  )
+)
+```
+
+Elastic net reduced held-out MAE from 8.49 to 8.15 points per 100 field-goal attempts. The paired bootstrap estimate for elastic net minus baseline MAE was −0.34, with a 95% interval of −0.77 to +0.10, indicating uncertainty around the modest improvement.
+
+##Final refit
+
+```{r development-final-refit}
+final_training_data <- modeling_data[
+  modeling_data$target_season < forecast_year,
+  ,
+  drop = FALSE
+]
+
+# Update imputation values using the full historical sample.
+final_medians <- vapply(
+  final_training_data[, predictor_columns, drop = FALSE],
+  function(x) {
+
+    usable <- x[is.finite(x)]
+
+    if (length(usable) == 0L) {
+      stop("A predictor has no finite historical values.")
+    }
+
+    median(usable)
+  },
+  numeric(1)
+)
+
+# Separate preparation function for the forecasting model.
+prepare_final_predictors <- function(data) {
+
+  predictors <- data[, predictor_columns, drop = FALSE]
+
+  missing_flags <- as.data.frame(
+    lapply(predictors, function(x) {
+      as.integer(!is.finite(x))
+    })
+  )
+
+  names(missing_flags) <- paste0(
+    predictor_columns,
+    "_missing"
+  )
+
+  for (column in predictor_columns) {
+
+    missing <- !is.finite(predictors[[column]])
+
+    predictors[[column]][missing] <- final_medians[[column]]
+  }
+
+  full_matrix <- as.matrix(cbind(predictors, missing_flags))
+
+  # Preserve the feature set chosen during model development.
+  full_matrix[, model_feature_names, drop = FALSE]
+}
+
+x_final <- prepare_final_predictors(final_training_data)
+y_final <- final_training_data$next_points_per_attempt
+
+stopifnot(
+  nrow(x_final) == length(y_final),
+  all(is.finite(x_final)),
+  all(is.finite(y_final))
+)
+
+# Include the selected lambda in a decreasing penalty sequence.
+refit_lambdas <- sort(
+  unique(c(best_elastic_net$lambda, best_lambda)),
+  decreasing = TRUE
+)
+
+final_elastic_net <- glmnet::glmnet(
+  x = x_final,
+  y = y_final,
+  family = "gaussian",
+  alpha = best_elastic_net_settings$alpha,
+  lambda = refit_lambdas,
+  standardize = TRUE
+)
+
+message(
+  "Refitted model using ",
+  nrow(final_training_data),
+  " historical player-season pairs."
+)
+```
+
+```{r development-player-forecast}
+# Select the player's season immediately before the forecast.
+player_forecast_data <- development_data[
+  development_data$player_id == player_id &
+    development_data$season == forecast_year - 1L,
+  ,
+  drop = FALSE
+]
+
+if (nrow(player_forecast_data) != 1L) {
+  stop("Expected exactly one current-season row for this player.")
+}
+
+if (
+  !is.finite(player_forecast_data$fga) ||
+  player_forecast_data$fga < minimum_current_attempts
+) {
+  stop("This player does not meet the current-season attempt threshold.")
+}
+
+x_player <- prepare_final_predictors(player_forecast_data)
+
+predicted_efficiency <- as.numeric(
+  predict(
+    final_elastic_net,
+    newx = x_player,
+    s = best_lambda,
+    type = "response"
+  )
+)
+
+stopifnot(
+  length(predicted_efficiency) == 1L,
+  is.finite(predicted_efficiency)
+)
+
+forecast_season_label <- paste0(
+  forecast_year - 1L,
+  "–",
+  sprintf("%02d", forecast_year %% 100L)
+)
+
+player_forecast <- data.frame(
+  player = player_forecast_data$player_name,
+  forecast_season = forecast_season_label,
+  previous_season_attempts = player_forecast_data$fga,
+  previous_points_per_attempt =
+    player_forecast_data$points_per_attempt,
+  predicted_points_per_attempt = predicted_efficiency,
+  predicted_change_per_100 = 100 * (
+    predicted_efficiency -
+      player_forecast_data$points_per_attempt
+  )
+)
+
+print(
+  knitr::kable(
+    player_forecast,
+    digits = 3,
+    caption = "Selected player: next-season efficiency forecast"
+  )
+)
+```
+
+The model projects Cason Wallace to score approximately 1.04 points per field-goal attempt in 2026–27, broadly unchanged from 1.036 in 2025–26. The projected increase of 0.37 points per 100 attempts is small relative to the model’s historical prediction error.
+
+##player development prediction interval
+
+```{r development-player-prediction-interval}
+# Signed errors from the model evaluated on the held-out season.
+# Positive means actual efficiency exceeded the prediction.
+test_residuals <- with(
+  development_test,
+  next_points_per_attempt - elastic_net_prediction
+)
+
+stopifnot(
+  length(test_residuals) > 0L,
+  all(is.finite(test_residuals))
+)
+
+# Estimate the lower and upper tails of historical errors.
+residual_limits <- quantile(
+  test_residuals,
+  probs = c(0.025, 0.975),
+  names = FALSE
+)
+
+# Add those historical errors to the player's point forecast.
+# Efficiency is bounded between 0 and 3 points per attempt.
+player_forecast_interval <- player_forecast
+
+player_forecast_interval$approx_lower_95 <- pmax(
+  0,
+  player_forecast_interval$predicted_points_per_attempt +
+    residual_limits[1]
+)
+
+player_forecast_interval$approx_upper_95 <- pmin(
+  3,
+  player_forecast_interval$predicted_points_per_attempt +
+    residual_limits[2]
+)
+
+# Express the interval as change from previous-season efficiency.
+player_forecast_interval$change_lower_per_100 <- 100 * (
+  player_forecast_interval$approx_lower_95 -
+    player_forecast_interval$previous_points_per_attempt
+)
+
+player_forecast_interval$change_upper_per_100 <- 100 * (
+  player_forecast_interval$approx_upper_95 -
+    player_forecast_interval$previous_points_per_attempt
+)
+
+print(
+  knitr::kable(
+    player_forecast_interval[
+      ,
+      c(
+        "player",
+        "forecast_season",
+        "predicted_points_per_attempt",
+        "approx_lower_95",
+        "approx_upper_95",
+        "predicted_change_per_100",
+        "change_lower_per_100",
+        "change_upper_per_100"
+      ),
+      drop = FALSE
+    ],
+    digits = 3,
+    caption = "Forecast with approximate historical-error interval"
+  )
+)
+```
+
+Cason Wallace’s projected 2026–27 efficiency is approximately 1.04 points per field-goal attempt, broadly unchanged from the previous season. An approximate historical-error interval of 0.81–1.29 indicates considerable uncertainty, providing little basis to predict a clear improvement or decline.
+
+
+```{r development-player-forecast-chart, fig.width=8, fig.height=5}
+plot_development_forecast <- function() {
+
+  # Select the player's historical seasons.
+  history <- development_data[
+    development_data$player_id == player_id &
+      development_data$season < forecast_year &
+      is.finite(development_data$points_per_attempt),
+    ,
+    drop = FALSE
+  ]
+
+  history <- history[order(history$season), , drop = FALSE]
+
+  stopifnot(
+    nrow(history) > 0L,
+    nrow(player_forecast_interval) == 1L
+  )
+
+  forecast <- player_forecast_interval
+
+  # Convert efficiency to points per 100 attempts.
+  historical_value <- 100 * history$points_per_attempt
+  forecast_value <- 100 * forecast$predicted_points_per_attempt
+  lower_value <- 100 * forecast$approx_lower_95
+  upper_value <- 100 * forecast$approx_upper_95
+
+  years <- c(history$season, forecast_year)
+
+  season_labels <- paste0(
+    years - 1L,
+    "–",
+    sprintf("%02d", years %% 100L)
+  )
+
+  # Restore graphics settings after plotting.
+  previous_settings <- par(no.readonly = TRUE)
+  on.exit(par(previous_settings), add = TRUE)
+
+  par(mar = c(5, 5, 4, 2))
+
+  value_range <- range(
+    historical_value,
+    lower_value,
+    upper_value
+  )
+
+  padding <- max(5, diff(value_range) * 0.15)
+
+  plot(
+    NA,
+    xlim = c(min(years) - 0.3, max(years) + 0.3),
+    ylim = value_range + c(-padding, padding),
+    xaxt = "n",
+    xlab = "Season",
+    ylab = "Points from field goals per 100 attempts",
+    main = paste0(
+      forecast$player,
+      ": historical efficiency and forecast"
+    )
+  )
+
+  axis(
+    side = 1,
+    at = years,
+    labels = season_labels
+  )
+
+  abline(
+    h = axTicks(2),
+    col = "gray90",
+    lty = 1
+  )
+
+  # Observed historical efficiency.
+  lines(
+    history$season,
+    historical_value,
+    type = "b",
+    pch = 16,
+    col = "#0072B2",
+    lwd = 2
+  )
+
+  # Dashed connection from the latest observation to the forecast.
+  segments(
+    x0 = tail(history$season, 1),
+    y0 = tail(historical_value, 1),
+    x1 = forecast_year,
+    y1 = forecast_value,
+    col = "#D55E00",
+    lty = 2,
+    lwd = 2
+  )
+
+  # Approximate historical-error interval.
+  arrows(
+    x0 = forecast_year,
+    y0 = lower_value,
+    x1 = forecast_year,
+    y1 = upper_value,
+    code = 3,
+    angle = 90,
+    length = 0.08,
+    col = "#D55E00",
+    lwd = 2
+  )
+
+  points(
+    forecast_year,
+    forecast_value,
+    pch = 18,
+    cex = 1.5,
+    col = "#D55E00"
+  )
+
+  legend(
+    "topleft",
+    legend = c(
+      "Observed",
+      "Forecast",
+      "Approximate 95% historical-error interval"
+    ),
+    col = c("#0072B2", "#D55E00", "#D55E00"),
+    pch = c(16, 18, NA),
+    lty = c(1, NA, 1),
+    lwd = c(2, NA, 2),
+    bty = "n",
+    cex = 0.8
+  )
+
+  mtext(
+    "Forecast conditional on next-season participation and field-goal attempts.",
+    side = 1,
+    line = 3.5,
+    cex = 0.75
+  )
+}
+
+plot_development_forecast()
+```
+
+```{r development-save-results}
+dir.create(
+  "outputs/development",
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# Use the player ID and forecast year in player-specific filenames.
+file_tag <- paste0(
+  "player_", player_id,
+  "_forecast_", forecast_year
+)
+
+write.csv(
+  player_forecast_interval,
+  file = file.path(
+    "outputs/development",
+    paste0(file_tag, ".csv")
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  final_test_comparison,
+  file = file.path(
+    "outputs/development",
+    "final_test_model_comparison.csv"
+  ),
+  row.names = FALSE
+)
+
+write.csv(
+  bootstrap_comparison,
+  file = file.path(
+    "outputs/development",
+    "final_test_mae_bootstrap.csv"
+  ),
+  row.names = FALSE
+)
+
+# Save the model together with everything needed to prepare new data.
+forecast_bundle <- list(
+  model = final_elastic_net,
+  alpha = best_elastic_net_settings$alpha,
+  lambda = best_lambda,
+  predictor_columns = predictor_columns,
+  model_feature_names = model_feature_names,
+  imputation_medians = final_medians,
+  minimum_current_attempts = minimum_current_attempts,
+  forecast_year = forecast_year,
+  historical_residual_limits = residual_limits,
+  training_pairs = nrow(final_training_data),
+  latest_training_target_year =
+    max(final_training_data$target_season),
+  package_versions = c(
+    R = as.character(getRversion()),
+    glmnet = as.character(utils::packageVersion("glmnet"))
+  )
+)
+
+saveRDS(
+  forecast_bundle,
+  file = file.path(
+    "outputs/development",
+    paste0("efficiency_model_", forecast_year, ".rds")
+  )
+)
+
+# Export the existing chart.
+chart_path <- file.path(
+  "outputs/development",
+  paste0(file_tag, ".png")
+)
+
+save_forecast_chart <- function(path) {
+
+  png(
+    filename = path,
+    width = 2400,
+    height = 1500,
+    res = 300
+  )
+
+  on.exit(dev.off(), add = TRUE)
+
+  plot_development_forecast()
+}
+
+save_forecast_chart(chart_path)
+
+message("Saved results in outputs/development.")
+```
+
