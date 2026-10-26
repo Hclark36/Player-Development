@@ -1,5 +1,12 @@
 # NBA Player Development: Next-Season Shooting Efficiency
 
+## Interactive player dashboard
+
+**[Open the dashboard folder](dashboard/)** for the searchable player dashboard and instructions. **[Download the standalone HTML](https://github.com/Hclark36/Player-Development/raw/refs/heads/main/dashboard/index.html)** and open it in a browser. Search player names, switch profiles, and download player results as CSV. No R server is required. GitHub's normal file view shows HTML source; download the file to use the dashboard.
+
+The original RMD is unchanged. To rebuild the dashboard in RStudio, run `source("scripts/build_dashboard.R")` from the repository root after installing the packages listed in [dashboard/README.md](dashboard/README.md).
+
+
 An R Markdown project that uses historical NBA player statistics to forecast **next-season points per field-goal attempt**.
 
 **Project question:** Can historical player performance predict next-season shooting efficiency better than simply repeating the previous season?
